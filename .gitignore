@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated version header
+src/version.h
+
+# Kokoro model files (large, downloaded at runtime)
+*.onnx
+*.bin
+*.txt
+
+# But keep project-level txt files
+!meson_options.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+#sherpa-onnx model cache
+sherpa-onnx-models/

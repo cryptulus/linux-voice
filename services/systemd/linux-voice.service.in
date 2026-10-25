@@ -1,0 +1,18 @@
+[Unit]
+Description=Software speech output for Speakup (Kokoro TTS)
+Documentation=man:linux-voice(8)
+Wants=modprobe@speakup_soft.service
+After=modprobe@speakup_soft.service sound.target
+
+[Service]
+Type=forking
+PIDFile=/run/linux-voice.pid
+Environment="default_voice="
+ExecStart=@bindir@/linux-voice --default-voice=${default_voice}
+ExecReload=kill -HUP $MAINPID
+Restart=always
+Nice=-10
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=sound.target

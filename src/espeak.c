@@ -1,0 +1,639 @@
+/*
+ *  linux-voice - interface which allows speakup to use Kokoro TTS
+ *
+ *  Copyright (C) 2008 William Hubbs
+ *  Copyright (C) 2025 linux-voice contributors
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#define _GNU_SOURCE
+#include <alsa/asoundlib.h>
+#include <assert.h>
+#include <math.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "espeakup.h"
+
+/* default voice settings */
+const int defaultFrequency = 5;
+const int defaultPitch = 5;
+const int defaultRange = 5;
+const int defaultRate = 2;
+const int defaultVolume = 5;
+char *defaultVoice = NULL;
+int alsaVolume = 0;
+
+/* multipliers and offsets */
+const int frequencyMultiplier = 11;
+const int pitchMultiplier = 11;
+const int rangeMultiplier = 11;
+const int rateMultiplier = 41;
+const int rateOffset = 80;
+const int volumeMultiplier = 22;
+
+volatile int stop_requested = 0;
+int paused_espeak = 1;
+
+/* Wedged-engine detection.  Espeak may legitimately refuse entries for a
+ * while (EE_BUFFER_FULL while a long backlog is being played back), so a
+ * failing entry is normally just retried.  But when entries keep failing
+ * while the synth callback reports no progress at all, the audio output
+ * is most likely wedged (e.g. an ALSA device stuck returning EBUSY).
+ * After ESPEAK_STALL_RETRIES consecutive such retries (about one second
+ * each), restart the engine; after ESPEAK_MAX_RESTARTS restarts without
+ * the engine having been healthy for ESPEAK_HEALTHY_SECS in between,
+ * give up and exit, so that the init system can respawn us. */
+#define ESPEAK_STALL_RETRIES 10
+#define ESPEAK_MAX_RESTARTS 3
+#define ESPEAK_HEALTHY_SECS 60
+
+/* Set by the synth callback whenever espeak makes synthesis progress;
+ * used to tell a merely backlogged engine from a wedged one.  The
+ * callback runs in espeak's own thread, so the flag is atomic. */
+static atomic_int synth_progressed = 0;
+static int stalled_retries = 0;
+static int restart_attempts = 0;
+static struct timespec last_restart;
+
+static int callback(short *wav, int numsamples, espeak_EVENT *events)
+{
+	int i;
+	atomic_store(&synth_progressed, 1);
+	for (i = 0; events[i].type != espeakEVENT_LIST_TERMINATED; i++) {
+		if (events[i].type == espeakEVENT_MARK) {
+			int mark = atoi(events[i].id.name);
+			if ((mark < 0) || (mark > 255))
+				continue;
+			softsynth_reportindex(mark);
+		}
+	}
+	return 0;
+}
+
+static espeak_ERROR set_frequency(struct synth_t *s, int freq,
+                                  enum adjust_t adj)
+{
+	espeak_ERROR rc;
+
+	if (adj == ADJ_DEC)
+		freq = -freq;
+	if (adj != ADJ_SET)
+		freq += s->frequency;
+	rc = espeak_SetParameter(espeakRANGE, freq * frequencyMultiplier, 0);
+	if (rc == EE_OK)
+		s->frequency = freq;
+	return rc;
+}
+
+static espeak_ERROR set_pitch(struct synth_t *s, int pitch, enum adjust_t adj)
+{
+	espeak_ERROR rc;
+
+	if (adj == ADJ_DEC)
+		pitch = -pitch;
+	if (adj != ADJ_SET)
+		pitch += s->pitch;
+	rc = espeak_SetParameter(espeakPITCH, pitch * pitchMultiplier, 0);
+	if (rc == EE_OK)
+		s->pitch = pitch;
+	return rc;
+}
+
+static espeak_ERROR set_range(struct synth_t *s, int range, enum adjust_t adj)
+{
+	espeak_ERROR rc;
+
+	if (adj == ADJ_DEC)
+		range = -range;
+	if (adj != ADJ_SET)
+		range += s->range;
+	rc = espeak_SetParameter(espeakRANGE, range * rangeMultiplier, 0);
+	if (rc == EE_OK)
+		s->range = range;
+	return rc;
+}
+
+static espeak_ERROR set_punctuation(struct synth_t *s, int punct,
+                                    enum adjust_t adj)
+{
+	espeak_ERROR rc;
+	espeak_PUNCT_TYPE espeak_punct;
+
+	if (adj == ADJ_DEC)
+		punct = -punct;
+	if (adj != ADJ_SET)
+		punct += s->punct;
+
+	switch (punct) {
+		case 0:
+			espeak_punct = espeakPUNCT_NONE;
+			break;
+		case 1:
+			espeak_punct = espeakPUNCT_SOME;
+			break;
+		case 2:
+			/* XXX: approximation */
+			espeak_punct = espeakPUNCT_SOME;
+			break;
+		case 3:
+		default:
+			espeak_punct = espeakPUNCT_ALL;
+			break;
+	}
+
+	rc = espeak_SetParameter(espeakPUNCTUATION, espeak_punct, 0);
+	if (rc == EE_OK)
+		s->punct = punct;
+	return rc;
+}
+
+static espeak_ERROR set_rate(struct synth_t *s, int rate, enum adjust_t adj)
+{
+	espeak_ERROR rc;
+
+	if (adj == ADJ_DEC)
+		rate = -rate;
+	if (adj != ADJ_SET)
+		rate += s->rate;
+	rc = espeak_SetParameter(espeakRATE, rate * rateMultiplier + rateOffset, 0);
+	if (rc == EE_OK)
+		s->rate = rate;
+	return rc;
+}
+
+static espeak_ERROR set_voice(struct synth_t *s, char *voice)
+{
+	espeak_ERROR rc;
+	espeak_VOICE voice_select;
+
+	rc = espeak_SetVoiceByName(voice);
+	if (rc != EE_OK) {
+		memset(&voice_select, 0, sizeof(voice_select));
+		voice_select.languages = voice;
+		rc = espeak_SetVoiceByProperties(&voice_select);
+	}
+	if (rc == EE_OK)
+		strcpy(s->voice, voice);
+	return rc;
+}
+
+static void set_alsa_volume(int vol)
+{
+	snd_mixer_t *m;
+	snd_mixer_elem_t *e;
+	int err;
+
+	err = snd_mixer_open(&m, 0);
+	if (err < 0) {
+		fprintf(stderr, "ALSA mixer open error: %s\n", snd_strerror(err));
+		return;
+	}
+
+	err = snd_mixer_attach(m, "default");
+	if (err < 0) {
+		fprintf(stderr, "ALSA mixer attach error: %s\n", snd_strerror(err));
+		return;
+	}
+	err = snd_mixer_selem_register(m, NULL, NULL);
+	if (err < 0) {
+		fprintf(stderr, "ALSA mixer load error: %s\n", snd_strerror(err));
+		return;
+	}
+	err = snd_mixer_load(m);
+	if (err < 0) {
+		fprintf(stderr, "ALSA mixer load error: %s\n", snd_strerror(err));
+		return;
+	}
+
+	/* Turn vol value to volume %.
+	 * We do not want to soften that much with ALSA, espeak is already
+	 * doing it. We want the default value (5) to be the usual default
+	 * volume (80%), and make higher values increase ALSA volume, up to
+	 * 100%. */
+
+	int volume = (vol + 1) * 50 / 10 + 50;
+
+	for (e = snd_mixer_first_elem(m); e; e = snd_mixer_elem_next(e)) {
+		if (snd_mixer_elem_get_type(e) != SND_MIXER_ELEM_SIMPLE)
+			continue;
+		if (snd_mixer_selem_is_enumerated(e))
+			continue;
+
+		if (snd_mixer_selem_has_playback_switch(e)) {
+			snd_mixer_selem_set_playback_switch_all(e, 1);
+		}
+
+		if (snd_mixer_selem_has_playback_volume(e)) {
+			long min, max, set;
+
+			err = snd_mixer_selem_get_playback_dB_range(e, &min, &max);
+			if (err == 0 && min < max) {
+				if (max - min < 2400) {
+					/* 24dB amplitude is too small for using a logscale */
+					set = min + volume * (max - min) / 100;
+				} else {
+					/* Use a logscale */
+					double volf = volume / 100.;
+					if (min != SND_CTL_TLV_DB_GAIN_MUTE) {
+						double minf = pow(10, (min - max) / 6000.);
+						volf = volf * (1 - minf) + minf;
+					}
+					set = 6000. * log10(volf) + max;
+				}
+				snd_mixer_selem_set_playback_dB_all(e, set, 0);
+			} else {
+				/* No dB setting, try a linear scale */
+				snd_mixer_selem_get_playback_volume_range(e, &min, &max);
+				set = min + volume * (max - min) / 100;
+				snd_mixer_selem_set_playback_volume_all(e, set);
+			}
+		}
+	}
+}
+
+static espeak_ERROR set_volume(struct synth_t *s, int vol, enum adjust_t adj)
+{
+	espeak_ERROR rc;
+
+	if (adj == ADJ_DEC)
+		vol = -vol;
+	if (adj != ADJ_SET)
+		vol += s->volume;
+	rc = espeak_SetParameter(espeakVOLUME, (vol + 1) * volumeMultiplier, 0);
+	if (rc == EE_OK) {
+		s->volume = vol;
+		if (alsaVolume)
+			set_alsa_volume(vol);
+	}
+
+	return rc;
+}
+
+static espeak_ERROR stop_speech(void)
+{
+	espeak_ERROR rc;
+
+	rc = espeak_Cancel();
+	return rc;
+}
+
+static espeak_ERROR speak_text(struct synth_t *s)
+{
+	espeak_ERROR rc;
+	int synth_mode = 0;
+
+	if (espeakup_mode == ESPEAKUP_MODE_ACSINT)
+		synth_mode |= espeakSSML;
+
+	if (espeakup_mode == ESPEAKUP_MODE_SPEAKUP && (s->len == 1)) {
+		char *buf = NULL;
+		int n;
+		unsigned char c = s->buf[0];
+		if (c == ' ')
+			n = asprintf(&buf,
+			             "<say-as interpret-as=\"tts:char\">&#32;</say-as>");
+		else if (c < 0x20 || c > 0x7e) {
+			/* Not a printable character; do not embed it in SSML, as
+			 * that would produce invalid markup.  Fall through to the
+			 * raw-synthesis path below. */
+			n = -1;
+		} else {
+			/* Escape characters that are special in XML/SSML so the
+			 * resulting markup stays well-formed; otherwise espeak-ng
+			 * misparses the <say-as> element, which is the source of
+			 * the spurious high-pitched "ringing" on these characters. */
+			const char *entity = NULL;
+			switch (c) {
+			case '<': entity = "&lt;"; break;
+			case '>': entity = "&gt;"; break;
+			case '&': entity = "&amp;"; break;
+			case '\'': entity = "&apos;"; break;
+			case '"': entity = "&quot;"; break;
+			}
+			if (entity)
+				n = asprintf(&buf,
+				             "<say-as interpret-as=\"characters\">%s</say-as>",
+				             entity);
+			else
+				n = asprintf(&buf,
+				             "<say-as interpret-as=\"characters\">%c</say-as>",
+				             c);
+		}
+		if (n == -1) {
+			/* D'oh.  Not much to do on allocation failure.
+			 * Perhaps espeak will happen to say the character */
+			rc = espeak_Synth(s->buf, s->len + 1, 0, POS_CHARACTER, 0,
+			                  synth_mode, NULL, NULL);
+		} else {
+			rc = espeak_Synth(buf, n + 1, 0, POS_CHARACTER, 0, espeakSSML, NULL,
+			                  NULL);
+			free(buf);
+		}
+	} else
+		rc = espeak_Synth(s->buf, s->len + 1, 0, POS_CHARACTER, 0, synth_mode,
+		                  NULL, NULL);
+	return rc;
+}
+
+static void free_espeak_entry(struct espeak_entry_t *entry)
+{
+	assert(entry);
+	if (entry->cmd == CMD_SPEAK_TEXT)
+		free(entry->buf);
+	free(entry);
+}
+
+static void synth_queue_clear()
+{
+	struct espeak_entry_t *current;
+
+	while (queue_peek(synth_queue)) {
+		current = (struct espeak_entry_t *) queue_remove(synth_queue);
+		free_espeak_entry(current);
+	}
+}
+
+static int reinitialize_espeak(struct synth_t *s)
+{
+	int rate;
+
+	/* Re-initialize espeak */
+	rate = espeak_Initialize(AUDIO_OUTPUT_PLAYBACK, 0, NULL, 0);
+	if (rate < 0) {
+		fprintf(stderr, "Unable to initialize espeak.\n");
+		return -1;
+	}
+
+	espeak_SetSynthCallback(callback);
+
+	/* Set parameters again */
+	espeak_SetVoiceByName(s->voice);
+	espeak_SetParameter(espeakRANGE, s->frequency * frequencyMultiplier, 0);
+	espeak_SetParameter(espeakPITCH, s->pitch * pitchMultiplier, 0);
+	espeak_SetParameter(espeakRATE, s->rate * rateMultiplier + rateOffset, 0);
+	espeak_SetParameter(espeakVOLUME, (s->volume + 1) * volumeMultiplier, 0);
+	espeak_SetParameter(espeakCAPITALS, 0, 0);
+	paused_espeak = 0;
+	return 0;
+}
+
+/* Wait for up to a second before retrying an entry which could not be
+ * processed, so that we do not busy-loop on a persistent error.  Called
+ * and returns with queue_guard held.  Wakes up immediately if a stop is
+ * requested. */
+static void espeak_wait_retry(void)
+{
+	struct timespec timeout;
+
+	clock_gettime(CLOCK_MONOTONIC, &timeout);
+	timeout.tv_sec++;
+	pthread_cond_timedwait(&wake_stop, &queue_guard, &timeout);
+}
+
+/* Handle an entry which could not be processed.  Called and returns
+ * with queue_guard held.
+ * Normally just back off before the retry, but watch out for a wedged
+ * engine: if entries keep failing while the synth callback shows no
+ * progress at all, restart the engine, and if restarting does not help
+ * either, exit so that the init system respawns us in a clean state. */
+static void espeak_handle_failure(struct synth_t *s)
+{
+	if (atomic_exchange(&synth_progressed, 0)) {
+		/* Espeak is making progress, it is merely backlogged. */
+		stalled_retries = 0;
+	} else if (++stalled_retries >= ESPEAK_STALL_RETRIES) {
+		stalled_retries = 0;
+		if (++restart_attempts > ESPEAK_MAX_RESTARTS) {
+			fprintf(stderr, "espeakup: espeak keeps failing without "
+			        "making progress and restarting it did not help, "
+			        "aborting\n");
+			/* Use _exit because exit could hang in library destructors
+			 * while the audio device is wedged. */
+			_exit(3);
+		}
+		fprintf(stderr, "espeakup: espeak has been failing without "
+		        "making progress for %d seconds, restarting it\n",
+		        ESPEAK_STALL_RETRIES);
+		/* Call into espeak with queue_guard released: these calls can
+		 * take time, or block on a wedged audio device.  If they do
+		 * block forever, the stop-acknowledgement timeout in the
+		 * softsynth thread is our last resort. */
+		pthread_mutex_unlock(&queue_guard);
+		if (!paused_espeak) {
+			espeak_Cancel();
+			espeak_Terminate();
+			paused_espeak = 1;
+		}
+		reinitialize_espeak(s);
+		clock_gettime(CLOCK_MONOTONIC, &last_restart);
+		pthread_mutex_lock(&queue_guard);
+		return;
+	}
+
+	espeak_wait_retry();
+}
+
+static struct espeak_entry_t *current = NULL;
+static void queue_process_entry(struct synth_t *s)
+{
+	espeak_ERROR error = EE_OK;
+	char markbuff[50];
+
+	if (current != queue_peek(synth_queue)) {
+		if (current)
+			free_espeak_entry(current);
+		current = queue_peek(synth_queue);
+	}
+	pthread_mutex_unlock(&queue_guard);
+
+	if (current->cmd != CMD_PAUSE && paused_espeak) {
+		if (reinitialize_espeak(s) < 0) {
+			/* Espeak is unavailable, so the entry cannot be processed.
+			 * Calling espeak functions on a terminated engine would
+			 * just fail (or worse).  Leave the entry queued and retry
+			 * after a small pause. */
+			pthread_mutex_lock(&queue_guard);
+			espeak_handle_failure(s);
+			return;
+		}
+	}
+
+	switch (current->cmd) {
+	case CMD_SET_FREQUENCY:
+		error = set_frequency(s, current->value, current->adjust);
+		break;
+	case CMD_SET_MARK:
+		snprintf(markbuff, sizeof(markbuff), "<mark name=\"%d\"/>",
+		         current->value);
+		error = espeak_Synth(markbuff, strlen(markbuff) + 1, 0, POS_CHARACTER,
+		                     0, espeakSSML, NULL, NULL);
+		break;
+	case CMD_SET_PITCH:
+		error = set_pitch(s, current->value, current->adjust);
+		break;
+	case CMD_SET_RANGE:
+		error = set_range(s, current->value, current->adjust);
+		break;
+	case CMD_SET_PUNCTUATION:
+		error = set_punctuation(s, current->value, current->adjust);
+		break;
+	case CMD_SET_RATE:
+		error = set_rate(s, current->value, current->adjust);
+		break;
+	case CMD_SET_VOICE:
+		error = EE_OK;
+		break;
+	case CMD_SET_VOLUME:
+		error = set_volume(s, current->value, current->adjust);
+		break;
+	case CMD_SPEAK_TEXT:
+		s->buf = current->buf;
+		s->len = current->len;
+		error = speak_text(s);
+		break;
+	case CMD_PAUSE:
+		if (!paused_espeak) {
+			error = espeak_Cancel();
+			if (error == EE_OK)
+				error = espeak_Terminate();
+			if (error == EE_OK)
+				paused_espeak = 1;
+		} else {
+			error = EE_OK;
+		}
+		break;
+	default:
+		/* Uh? */
+		error = EE_OK;
+		break;
+	}
+
+	pthread_mutex_lock(&queue_guard);
+	if (error == EE_OK) {
+		/* Processed, drop it */
+		struct espeak_entry_t *unqueued = queue_remove(synth_queue);
+		assert(unqueued == current);
+		free_espeak_entry(current);
+		current = NULL;
+		stalled_retries = 0;
+		if (restart_attempts) {
+			/* Forget about past restarts once the engine has been
+			 * healthy for a while.  Entries can spuriously succeed
+			 * right after a restart while the audio output is still
+			 * wedged (espeak's internal queue is empty again), so a
+			 * quick success must not reset the counter. */
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (now.tv_sec - last_restart.tv_sec >= ESPEAK_HEALTHY_SECS)
+				restart_attempts = 0;
+		}
+	} else {
+		if (error != EE_BUFFER_FULL)
+			fprintf(stderr, "espeak error: %d\n", error);
+		/* The entry stays queued and will be retried.  Give espeak a
+		 * little break before that, whatever the error: previously only
+		 * EE_BUFFER_FULL throttled, and any other persistent error made
+		 * us retry the same entry in a tight loop, burning a whole CPU. */
+		espeak_handle_failure(s);
+	}
+}
+
+int initialize_espeak(struct synth_t *s)
+{
+	int rate;
+
+	/* initialize espeak */
+	rate = espeak_Initialize(AUDIO_OUTPUT_PLAYBACK, 0, NULL, 0);
+	if (rate < 0) {
+		fprintf(stderr, "Unable to initialize espeak.\n");
+		return -1;
+	}
+
+	espeak_SetSynthCallback(callback);
+
+	/* Setup initial voice parameters */
+	if (defaultVoice && defaultVoice[0]) {
+		set_voice(s, defaultVoice);
+		free(defaultVoice);
+		defaultVoice = NULL;
+	}
+	set_frequency(s, defaultFrequency, ADJ_SET);
+	set_pitch(s, defaultPitch, ADJ_SET);
+	set_range(s, defaultRange, ADJ_SET);
+	set_rate(s, defaultRate, ADJ_SET);
+	set_volume(s, defaultVolume, ADJ_SET);
+	espeak_SetParameter(espeakCAPITALS, 0, 0);
+	paused_espeak = 0;
+	return 0;
+}
+
+/* espeak_thread is the "main" function of our secondary (queue-processing)
+ * thread.
+ * First, lock queue_guard, because it needs to be locked when we call
+ * pthread_cond_wait on the runner_awake condition variable.
+ * Next, enter an infinite loop.
+ * The wait call also unlocks queue_guard, so that the other thread can
+ * manipulate the queue.
+ * When runner_awake is signaled, the pthread_cond_wait call re-locks
+ * queue_guard, and the "queue processor" thread has access to the queue.
+ * While there is an entry in the queue, call queue_process_entry.
+ * queue_process_entry unlocks queue_guard after removing an item from the
+ * queue, so that the main thread doesn't have to wait for us to finish
+ * processing the entry.  So re-lock queue_guard after each call to
+ * queue_process_entry.
+ *
+ * The main thread can add items to the queue in exactly two situations:
+ * 1. We are waiting on runner_awake, or
+ * 2. We are processing an entry that has just been removed from the queue.
+ */
+void *espeak_thread(void *arg)
+{
+	struct synth_t *s = (struct synth_t *) arg;
+
+	pthread_mutex_lock(&queue_guard);
+	while (should_run) {
+		while (should_run && !queue_peek(synth_queue) && !stop_requested)
+			pthread_cond_wait(&runner_awake, &queue_guard);
+
+		if (stop_requested) {
+			current = NULL;
+			/* Call into espeak with queue_guard released: espeak_Cancel
+			 * can take time, or even block indefinitely when the audio
+			 * output is wedged, and holding the lock here would prevent
+			 * the other threads from ever making progress again.  The
+			 * queue cannot change concurrently: the only producer (the
+			 * softsynth thread) is blocked waiting for stop_acknowledged
+			 * as long as stop_requested is set. */
+			pthread_mutex_unlock(&queue_guard);
+			stop_speech();
+			pthread_mutex_lock(&queue_guard);
+			synth_queue_clear();
+			stop_requested = 0;
+			pthread_cond_signal(&stop_acknowledged);
+		}
+
+		while (should_run && queue_peek(synth_queue) && !stop_requested) {
+			queue_process_entry(s);
+		}
+	}
+	pthread_cond_signal(&stop_acknowledged);
+	pthread_mutex_unlock(&queue_guard);
+	return NULL;
+}

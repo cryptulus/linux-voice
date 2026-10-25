@@ -1,0 +1,107 @@
+/*
+ *  linux-voice - interface which allows speakup to use Kokoro TTS
+ *
+ *  Copyright (C) 2008 William Hubbs
+ *  Copyright (C) 2025 linux-voice contributors
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <getopt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "espeakup.h"
+#include "stringhandling.h"
+#include "version.h"
+
+/* pid path */
+extern char *pidPath;
+
+/* default voice */
+extern char *defaultVoice;
+
+/* Whether to drive ALSA volume */
+extern int alsaVolume;
+
+/* command line options */
+const char *shortOptions = "P:V:adhv";
+const struct option longOptions[] = {
+	{"pid-path", required_argument, NULL, 'P'},
+	{"default-voice", required_argument, NULL, 'V'},
+	{"alsa-volume", no_argument, &alsaVolume, 1},
+	{"acsint", no_argument, NULL, 'a'},
+	{"debug", no_argument, NULL, 'd'},
+	{"help", no_argument, NULL, 'h'},
+	{"version", no_argument, NULL, 'v'},
+	{0, 0, 0, 0}};
+
+static void show_help()
+{
+	printf("Usage: espeakup [options]\n\n");
+	printf("Options are as follows:\n");
+	printf("  --pid-path=path, -P path\t\tSet path for pid file.\n");
+	printf("  --default-voice=voice, -V voice\tSet default voice.\n");
+	printf("  --alsa-volume\t\t\t\tDrive the ALSA volume.\n");
+	printf("  --debug, -d\t\t\t\tDebug mode (stay in the foreground).\n");
+	printf("  --help, -h\t\t\t\tShow this help.\n");
+	printf("  --version, -v\t\t\t\tDisplay the software version.\n");
+	exit(0);
+}
+
+static void show_version(void)
+{
+	printf("ESpeakup %s\n", PACKAGE_VERSION);
+	printf("Copyright (C) 2008 William Hubbs <w.d.hubbs@gmail.com>\n");
+	printf("License GPLv3+: GNU GPL version 3 or later\n");
+	printf("You are free to change and redistribute this software.\n");
+	printf("Please report bugs to %s\n", PACKAGE_BUGREPORT);
+	exit(0);
+}
+
+void process_cli(int argc, char **argv)
+{
+	int opt;
+
+	do {
+		opt = getopt_long(argc, argv, shortOptions, longOptions, NULL);
+		switch (opt) {
+		case 'P':
+			pidPath = dupeString(optarg);
+			break;
+		case 'V':
+			defaultVoice = dupeString(optarg);
+			break;
+		case 'a':
+			espeakup_mode = ESPEAKUP_MODE_ACSINT;
+			break;
+		case 'd':
+			debug = 1;
+			break;
+		case 'h':
+			show_help();
+			break;
+		case 'v':
+			show_version();
+			break;
+		case -1:
+		case 0:
+			break;
+		default:
+			show_help();
+			break;
+		}
+	} while (opt != -1);
+}
