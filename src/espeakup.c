@@ -67,7 +67,7 @@ int espeakup_start_daemon(void)
 	if (pid) {
 		// Parent, just wait for daemon
 		if (read(fds[0], &c, 1) < 0) {
-			printf("Espeakup is already running!\n");
+			printf("linux-voice is already running!\n");
 			exit(1);
 		}
 		exit(c);
@@ -183,7 +183,7 @@ int main(int argc, char **argv)
 		fd = espeakup_start_daemon();
 
 		if (espeakup_is_running()) {
-			printf("Espeakup is already running!\n");
+			printf("linux-voice is already running!\n");
 			ret = 1;
 			goto out;
 		}

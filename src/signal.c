@@ -72,7 +72,7 @@ void *signal_thread(void *arg)
 			pthread_mutex_unlock(&queue_guard);
 			break;
 		default:
-			printf("espeakup caught signal %d\n", sig);
+			printf("linux-voice caught signal %d\n", sig);
 			break;
 		}
 		pthread_mutex_lock(&queue_guard);

@@ -253,7 +253,7 @@ static void request_espeak_stop(void)
 		 * SIGTERM, and stalling the whole console by not draining
 		 * /dev/softsynth anymore.  Use _exit because exit could hang in
 		 * library destructors while the audio device is wedged. */
-		fprintf(stderr, "espeakup: espeak did not acknowledge a stop "
+		fprintf(stderr, "linux-voice: espeak did not acknowledge a stop "
 		        "request within %d seconds, aborting\n", stopAckTimeout);
 		_exit(3);
 	}

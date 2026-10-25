@@ -423,14 +423,14 @@ static void espeak_handle_failure(struct synth_t *s)
 	} else if (++stalled_retries >= ESPEAK_STALL_RETRIES) {
 		stalled_retries = 0;
 		if (++restart_attempts > ESPEAK_MAX_RESTARTS) {
-			fprintf(stderr, "espeakup: espeak keeps failing without "
+			fprintf(stderr, "linux-voice: espeak keeps failing without "
 			        "making progress and restarting it did not help, "
 			        "aborting\n");
 			/* Use _exit because exit could hang in library destructors
 			 * while the audio device is wedged. */
 			_exit(3);
 		}
-		fprintf(stderr, "espeakup: espeak has been failing without "
+		fprintf(stderr, "linux-voice: espeak has been failing without "
 		        "making progress for %d seconds, restarting it\n",
 		        ESPEAK_STALL_RETRIES);
 		/* Call into espeak with queue_guard released: these calls can

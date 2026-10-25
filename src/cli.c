@@ -50,7 +50,7 @@ const struct option longOptions[] = {
 
 static void show_help()
 {
-	printf("Usage: espeakup [options]\n\n");
+	printf("Usage: linux-voice [options]\n\n");
 	printf("Options are as follows:\n");
 	printf("  --pid-path=path, -P path\t\tSet path for pid file.\n");
 	printf("  --default-voice=voice, -V voice\tSet default voice.\n");
@@ -63,7 +63,7 @@ static void show_help()
 
 static void show_version(void)
 {
-	printf("ESpeakup %s\n", PACKAGE_VERSION);
+	printf("linux-voice %s\n", PACKAGE_VERSION);
 	printf("Copyright (C) 2008 William Hubbs <w.d.hubbs@gmail.com>\n");
 	printf("License GPLv3+: GNU GPL version 3 or later\n");
 	printf("You are free to change and redistribute this software.\n");
