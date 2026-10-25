@@ -2,7 +2,7 @@
  *  linux-voice - interface which allows speakup to use Kokoro TTS
  *
  *  Copyright (C) 2008 William Hubbs
- *  Copyright (C) 2025 linux-voice contributors
+ *  Copyright (C) 2026 Greg Osborne
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -74,6 +74,8 @@ static struct timespec last_restart;
 
 static int callback(short *wav, int numsamples, espeak_EVENT *events)
 {
+	(void)wav;
+	(void)numsamples;
 	int i;
 	atomic_store(&synth_progressed, 1);
 	for (i = 0; events[i].type != espeakEVENT_LIST_TERMINATED; i++) {

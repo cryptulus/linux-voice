@@ -2,7 +2,7 @@
  *  linux-voice - interface which allows speakup to use Kokoro TTS
  *
  *  Copyright (C) 2008 William Hubbs
- *  Copyright (C) 2025 linux-voice contributors
+ *  Copyright (C) 2026 Greg Osborne
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -34,10 +34,12 @@
  */
 static void dummy_handler(int sig)
 {
+	(void)sig;
 }
 
 void *signal_thread(void *arg)
 {
+	(void)arg;
 	struct sigaction temp;
 	sigset_t sigset;
 	int sig;

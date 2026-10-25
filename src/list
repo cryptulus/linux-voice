@@ -1,0 +1,26 @@
+cli.c:	printf("Usage: espeakup [options]\n\n");
+cli.c:			espeakup_mode = ESPEAKUP_MODE_ACSINT;
+espeak.c:	if (espeakup_mode == ESPEAKUP_MODE_ACSINT)
+espeak.c:	if (espeakup_mode == ESPEAKUP_MODE_SPEAKUP && (s->len == 1)) {
+espeak.c:			fprintf(stderr, "espeakup: espeak keeps failing without "
+espeak.c:		fprintf(stderr, "espeakup: espeak has been failing without "
+linux-voice.c: *  Based on espeakup by William Hubbs
+linux-voice.c:char *pidPath = "/var/run/espeakup.pid";
+linux-voice.c:enum espeakup_mode_t espeakup_mode = ESPEAKUP_MODE_SPEAKUP;
+linux-voice.c:int espeakup_start_daemon(void)
+linux-voice.c:int espeakup_is_running(void)
+linux-voice.c:	if (!debug && espeakup_mode == ESPEAKUP_MODE_SPEAKUP) {
+linux-voice.c:		fd = espeakup_start_daemon();
+linux-voice.c:		if (espeakup_is_running()) {
+linux-voice.c:	if (!debug && espeakup_mode == ESPEAKUP_MODE_SPEAKUP)
+linux-voice.c:	if (!debug && espeakup_mode == ESPEAKUP_MODE_SPEAKUP) {
+signal.c:			printf("espeakup caught signal %d\n", sig);
+softsynth.c:		if (espeakup_mode == ESPEAKUP_MODE_ACSINT && textAccumulator_l != 0) {
+softsynth.c:		fprintf(stderr, "espeakup: espeak did not acknowledge a stop "
+softsynth.c:	if (espeakup_mode == ESPEAKUP_MODE_ACSINT) {
+softsynth.c:		if (espeakup_mode == ESPEAKUP_MODE_SPEAKUP)
+softsynth.c:	if (espeakup_mode == ESPEAKUP_MODE_ACSINT) {
+linux-voice.h:#define PACKAGE_BUGREPORT "https://github.com/linux-speakup/espeakup/issues"
+linux-voice.h:enum espeakup_mode_t
+linux-voice.h:extern enum espeakup_mode_t espeakup_mode;
+version.h.in: *  Based on espeakup by William Hubbs

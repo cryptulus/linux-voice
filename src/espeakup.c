@@ -3,8 +3,7 @@
  *
  *  Based on espeakup by William Hubbs
  *  Copyright (C) 2008 William Hubbs
- *  Copyright (C) 2025 linux-voice contributors
- *  Copyright (C) 2025 linux-voice contributors
+ *  Copyright (C) 2026 Greg Osborne
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -142,7 +141,7 @@ error:
 
 int main(int argc, char **argv)
 {
-	int fd, devnull;
+	int fd = -1, devnull;
 	char ret = 0;
 	sigset_t sigset;
 	int err;
